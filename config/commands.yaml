@@ -1,0 +1,84 @@
+# The Writ command table ("agent system-call table").
+#
+# Agents never call these upstream APIs. They request a command by name; the gate checks
+# the request against the task's grant and dispatches an authorized, single-use
+# operation to the executor, which holds the credentials.
+commands:
+  - name: crm.get_customer
+    description: Read one CRM customer record (id, name, billing_contact, tags, note).
+    integration: demo_crm
+    adapter: crm
+    operation: get_customer
+    effect_class: read
+    args_schema:
+      type: object
+      required: [customer_id]
+      properties:
+        customer_id: { type: string, pattern: "^cus_[A-Za-z0-9]+$" }
+
+  - name: crm.update_customer
+    description: Update fields on a CRM customer. Only fields present in `fields` are changed.
+    integration: demo_crm
+    adapter: crm
+    operation: update_customer
+    effect_class: write
+    budgets: { writes: 1 }
+    args_schema:
+      type: object
+      required: [customer_id, fields]
+      properties:
+        customer_id: { type: string, pattern: "^cus_[A-Za-z0-9]+$" }
+        fields:
+          type: object
+          additionalProperties: false
+          minProperties: 1
+          properties:
+            name: { type: string, maxLength: 200 }
+            note: { type: string, maxLength: 2000 }
+            billing_contact: { type: string, format: email, maxLength: 320 }
+            tags:
+              type: array
+              maxItems: 20
+              items: { type: string, maxLength: 40 }
+
+  - name: billing.list_charges
+    description: List charges for a customer.
+    integration: demo_billing
+    adapter: billing
+    operation: list_charges
+    effect_class: read
+    args_schema:
+      type: object
+      required: [customer_id]
+      properties:
+        customer_id: { type: string, pattern: "^cus_[A-Za-z0-9]+$" }
+
+  - name: billing.refund
+    description: Refund part or all of a charge to its original payment method.
+    integration: demo_billing
+    adapter: billing
+    operation: refund
+    effect_class: money
+    budgets: { money_cents: "args.amount_cents", refunds: 1 }
+    args_schema:
+      type: object
+      required: [charge_id, amount_cents, reason]
+      properties:
+        charge_id: { type: string, pattern: "^ch_[A-Za-z0-9]+$" }
+        amount_cents: { type: integer, minimum: 1, maximum: 100000000 }
+        reason: { type: string, maxLength: 500 }
+
+  - name: email.send
+    description: Send an email from the company support account.
+    integration: demo_email
+    adapter: email
+    operation: send
+    effect_class: send
+    budgets: { sends: 1 }
+    args_schema:
+      type: object
+      required: [to, subject, body]
+      properties:
+        to: { type: string, format: email, maxLength: 320 }
+        subject: { type: string, maxLength: 200 }
+        body: { type: string, maxLength: 20000 }

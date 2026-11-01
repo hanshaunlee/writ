@@ -1,0 +1,63 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv venv --python ${{ matrix.python }} && uv sync --frozen --extra dev
+      - run: .venv/bin/ruff check src tests examples
+      - run: .venv/bin/ruff format --check src tests examples
+      - run: .venv/bin/python -m pytest
+      - name: lockfile is current
+        run: uv lock --check
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.13 && uv sync --frozen --extra dev
+      - name: known-vulnerability scan of locked dependencies
+        run: uv export --frozen --no-dev --no-emit-project --no-hashes -o /tmp/req.txt && .venv/bin/pip-audit -r /tmp/req.txt
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - run: uv venv --python 3.13 && uv pip install dist/*.whl && .venv/bin/writ --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.13 && uv sync --frozen --extra dev
+      - run: .venv/bin/writ keygen --out deploy/keys
+      - run: docker compose -f deploy/docker-compose.yml --env-file deploy/keys/writ.env up -d --build --wait
+      - run: scripts/demo.sh
+      - run: scripts/check-isolation.sh
+      - name: gate logs are JSON lines without secrets
+        run: |
+          docker compose -f deploy/docker-compose.yml --env-file deploy/keys/writ.env logs --no-color gate | grep -v '^gate' | head -5
+          ! docker compose -f deploy/docker-compose.yml --env-file deploy/keys/writ.env logs --no-color | grep -q "$(grep '^WRIT_ADMIN_TOKEN=' deploy/keys/writ.env | cut -d= -f2-)"
+      - if: always()
+        run: docker compose -f deploy/docker-compose.yml --env-file deploy/keys/writ.env logs

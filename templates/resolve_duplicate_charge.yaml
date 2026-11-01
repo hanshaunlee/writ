@@ -1,0 +1,79 @@
+# Task contract template: resolve a duplicate charge.
+#
+# Parameters are filled by the operator (or an operator-approved tool), never by the
+# acting agent. The resulting grant is the *maximum* authority any agent or sub-agent
+# working on this task can hold.
+name: resolve_duplicate_charge
+description: >
+  Resolve a duplicate charge for one customer: refund at most {{max_refund_cents}} cents
+  to the original payment method, record a note, and notify the existing billing contact.
+parameters:
+  customer_id: { description: CRM customer id, example: cus_123 }
+  billing_contact: { description: The customer's billing contact at task creation time }
+  max_refund_cents: { description: Maximum total refund across all sub-agents, example: 20000 }
+  charge_ids: { description: Charges eligible for refund (JSON list), example: '["ch_1","ch_2"]' }
+ttl_seconds: 3600
+grant:
+  commands:
+    - command: crm.get_customer
+      args:
+        customer_id: { eq: "{{customer_id}}" }
+    - command: billing.list_charges
+      args:
+        customer_id: { eq: "{{customer_id}}" }
+    - command: crm.update_customer
+      args:
+        customer_id: { eq: "{{customer_id}}" }
+        fields: { keys_subset: [note, tags] }
+    - command: billing.refund
+      args:
+        charge_id: { in: "{{charge_ids}}" }
+        amount_cents: { max: "{{max_refund_cents}}" }
+    - command: email.send
+      args:
+        to: { eq: "{{billing_contact}}" }
+  budgets:
+    money_cents: "{{max_refund_cents}}"
+    refunds: 2
+    sends: 1
+    writes: 3
+  forbidden_effects:
+    - external_export
+    - notification_redirect
+
+# Intent: what this task exists to achieve, and what it must not advance by any means
+# (including by asking a human in an email). See docs/intent.md.
+intent:
+  outcomes:
+    - name: refund_duplicate_charge
+      description: Refund the duplicate charge to the original payment method.
+      realized_by: [{ command: billing.refund }]
+    - name: notify_billing_contact
+      description: Tell the existing billing contact what was done.
+      realized_by: [{ command: email.send }]
+    - name: record_note
+      description: Record a note on the customer.
+      realized_by: [{ command: crm.update_customer, effect: field_change, field: note }]
+  non_goals:
+    - name: change_billing_contact
+      description: Change where billing notifications go (billing contact / billing email), directly or by asking anyone to.
+      realized_by: [{ command: crm.update_customer, effect: field_change, field: billing_contact }]
+      protected_fields: [billing_contact]
+      keywords: [billing contact, billing email, billing emails, billing notifications, invoices go to, send invoices to]
+      compliance: 0.3
+    - name: grant_account_status
+      description: Change the customer's status, tier, tags or entitlements (VIP, discounts, upgrades).
+      realized_by: [{ command: crm.update_customer, effect: field_change, field: tags }]
+      keywords: [vip, tier, upgrade, upgraded, discount, entitlement, priority support]
+      compliance: 0.2
+    - name: export_customer_data
+      description: Cause customer data to leave the system (exports, forwards, sharing).
+      realized_by: [{ command: crm.update_customer, effect: external_export }]
+      keywords: [export, forward to, forward the, forward all, forward their, cc, bcc, copy, share the account, send the data, data warehouse, invoices]
+      compliance: 0.2
+  sink_commands: [email.send]
+  prior_compromise: 0.02
+  risk_budget: 0.03
+  false_hold_alpha: 0.01
+  lookahead: 3
+  untrusted_atoms_policy: hold

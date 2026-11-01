@@ -1,0 +1,111 @@
+# Writ reference deployment.
+#
+# Network segmentation is part of the security model:
+#   agents    - the only network agents can reach; it contains the gate and nothing else.
+#   control   - gate <-> executor. internal: no egress.
+#   upstream  - executor <-> protected systems (here the demo SaaS). internal: no egress.
+# The agent container has no credentials, no route to the executor, and no route upstream.
+#
+# Secrets come from deploy/keys/writ.env (generate with `writ keygen`); point WRIT_ENV_FILE at
+# another file to run a stack with different secrets.
+# Tunables below can be overridden from the environment (see docs/deploy.md).
+
+name: writ
+
+# One image for every service. Only the gate carries the build section so that
+# `up --build` builds the image exactly once (parallel builds of one tag collide).
+x-common: &common
+  image: ${WRIT_IMAGE:-writ:local}
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  demo-saas:
+    <<: *common
+    command: ["writ-demo-saas"]
+    env_file: ${WRIT_ENV_FILE:-keys/writ.env}
+    environment:
+      DEMO_SAAS_API_KEY: ${WRIT_DEMO_SAAS_API_KEY}
+      WRIT_PORT: "9000"
+    networks: [upstream]            # internal network: not reachable from the host or from agents
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:9000/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  executor:
+    <<: *common
+    command: ["writ-executor"]
+    env_file: ${WRIT_ENV_FILE:-keys/writ.env}
+    environment:
+      WRIT_PORT: "8081"
+      WRIT_GATE_URL: http://gate:8080
+      WRIT_DEMO_SAAS_URL: http://demo-saas:9000
+      WRIT_EXECUTOR_DB_PATH: /var/lib/writ/executor.db
+      WRIT_NONCE_RETENTION_DAYS: ${WRIT_NONCE_RETENTION_DAYS:-30}
+    volumes: [executor-data:/var/lib/writ]
+    networks: [control, upstream]
+    depends_on:
+      demo-saas: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8081/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gate:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["writ-gate"]
+    env_file: ${WRIT_ENV_FILE:-keys/writ.env}
+    environment:
+      WRIT_PORT: "8080"
+      WRIT_EXECUTOR_URL: http://executor:8081
+      WRIT_DB_PATH: /var/lib/writ/gate.db
+      WRIT_AUTHORIZATION_TTL_SECONDS: ${WRIT_AUTHORIZATION_TTL_SECONDS:-60}
+      WRIT_MAX_TASKS_PER_TREE: ${WRIT_MAX_TASKS_PER_TREE:-256}
+      WRIT_MAX_BODY_BYTES: ${WRIT_MAX_BODY_BYTES:-1048576}
+      WRIT_AGENT_RATE_LIMIT: ${WRIT_AGENT_RATE_LIMIT:-50}
+      WRIT_AGENT_RATE_BURST: ${WRIT_AGENT_RATE_BURST:-100}
+      WRIT_SWEEP_INTERVAL_SECONDS: ${WRIT_SWEEP_INTERVAL_SECONDS:-30}
+      WRIT_ENABLE_DOCS: ${WRIT_ENABLE_DOCS:-0}
+      WRIT_ADMIN_TOKENS: ${WRIT_ADMIN_TOKENS:-}
+    volumes: [gate-data:/var/lib/writ]
+    networks: [agents, control]
+    ports: ["${WRIT_BIND:-127.0.0.1:8080}:8080"]
+    depends_on:
+      executor: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # An agent-side container: reaches only the gate and holds only a task token.
+  # Deliberately no env_file: it must never see the admin token, internal token or keys.
+  agent:
+    <<: *common
+    profiles: [agent]
+    command: ["sleep", "infinity"]
+    environment:
+      WRIT_GATE_URL: http://gate:8080
+      WRIT_TASK_TOKEN: ${WRIT_TASK_TOKEN:-}
+    networks: [agents]
+
+networks:
+  agents: {}
+  control: { internal: true }
+  upstream: { internal: true }
+
+volumes:
+  gate-data: {}
+  executor-data: {}
